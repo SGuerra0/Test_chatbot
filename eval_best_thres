@@ -1,0 +1,178 @@
+import chromadb
+from langsmith import Client
+from langsmith.evaluation import evaluate
+from transformers import AutoModelForCausalLM, AutoTokenizer
+from langchain_core.prompts import PromptTemplate
+from langchain_fireworks import FireworksEmbeddings, Fireworks
+import os
+from dotenv import load_dotenv
+
+# Cargar variables de entorno
+load_dotenv()
+
+# Configuración de la API key de LangSmith
+os.environ["LANGCHAIN_TRACING_V2"] = "true"
+os.environ["LANGCHAIN_ENDPOINT"] = "https://api.smith.langchain.com"
+os.environ["LANGCHAIN_API_KEY"] = "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"  # Reemplaza con tu clave de API
+os.environ["LANGCHAIN_PROJECT"] = "Evaluator_v2"
+
+if "FIREWORKS_API_KEY" not in os.environ:
+    os.environ["FIREWORKS_API_KEY"] = "fw_3ZJRGszUTX6LNDL7z6rEUUWB"  # Reemplaza con tu clave de Fireworks
+
+# Cliente LangSmith
+client = Client()
+
+# Configuración del modelo de Fireworks con ajustes en los parámetros
+model_wrapper = Fireworks(
+    model="accounts/fireworks/models/llama-v3p1-70b-instruct",
+    temperature=0.3,  # Temperatura reducida para respuestas más coherentes
+    max_tokens=500,   # Aumentado si las respuestas son largas
+)
+
+# Configura tu cliente de ChromaDB
+CHROMA_PATH = "data/Test100"  # Actualiza esta ruta si es necesario
+DB_NAME = "test100"
+chroma_client = chromadb.PersistentClient(path=CHROMA_PATH)
+collection = chroma_client.get_collection(name=DB_NAME)
+
+# Cargar el modelo para embeddings de Fireworks
+embedding_model = FireworksEmbeddings(
+    model="nomic-ai/nomic-embed-text-v1.5"
+)
+
+def retrieve_docs(question):
+    """
+    Recupera documentos relevantes de la base de datos ChromaDB usando el embedding de Fireworks.
+    Aplica un umbral de similitud para filtrar documentos menos relevantes.
+    """
+    # Genera el embedding de la consulta
+    query_embedding = embedding_model.embed_documents([question])[0]
+
+    # Realiza la consulta en la colección de ChromaDB
+    results = collection.query(
+        query_embeddings=[query_embedding],
+        n_results=10,  # Aumenta el número de resultados para más contexto
+        include=['documents', 'distances']
+    )
+
+    if not results['documents']:
+        print("Unable to find matching results.")
+        return ""
+
+    # Filtra documentos por umbral de similitud
+    threshold = 0.8  # Ajusta este valor según tus necesidades
+    filtered_docs = []
+    for doc_list, distance_list in zip(results['documents'], results['distances']):
+        for doc, distance in zip(doc_list, distance_list):
+            if distance >= threshold:
+                filtered_docs.append(doc)
+
+    # Si no hay documentos que cumplan el umbral, utiliza todos los documentos
+    if not filtered_docs:
+        filtered_docs = [item for sublist in results['documents'] for item in sublist]
+
+    context_text = "\n\n---\n\n".join(filtered_docs)
+    return context_text
+
+# Definir el PromptTemplate para estructurar mejor el prompt
+prompt_template = PromptTemplate(
+    input_variables=["context", "question"],
+    template="""Eres un asistente experto en temas de AFP. Basándote exclusivamente en la siguiente información, responde la pregunta de manera clara, concisa y amable. Si no encuentras la respuesta en la información proporcionada, indica que no dispones de esa información.
+
+Información:
+{context}
+
+Pregunta: {question}
+
+Respuesta:"""
+)
+
+class RagBot:
+    def __init__(self, model, retriever):
+        self._model = model
+        self._retriever = retriever
+
+    def get_answer(self, question: str):
+        docs = self._retriever(question)
+
+        # Manejo de casos sin documentos relevantes
+        if not docs.strip():
+            return "Lo siento, no tengo información disponible para responder a tu pregunta.", ""
+
+        # Utilizar el PromptTemplate para estructurar el prompt
+        prompt = prompt_template.format(context=docs, question=question)
+
+        # Generar la respuesta
+        result = self._model.generate([prompt])
+
+        # Acceder al texto generado y realizar postprocesamiento
+        generated_text = result.generations[0][0].text.strip()
+
+        # Limpiar la respuesta si es necesario
+        if "Respuesta:" in generated_text:
+            generated_text = generated_text.split("Respuesta:")[-1].strip()
+
+        return generated_text, docs  # Devuelve la respuesta y los documentos
+
+rag_bot = RagBot(model_wrapper, retrieve_docs)
+
+def predict_rag_answer_with_context(example):
+    """
+    Predice la respuesta basada en la pregunta de ejemplo y los contextos recuperados.
+    """
+    question = example.get("input_question", "")
+    response, contexts = rag_bot.get_answer(question)
+    return {"answer": response, "contexts": contexts}
+
+def docs_relevance_evaluator(run, example):
+    """
+    Evalúa la relevancia de los documentos recuperados para la pregunta dada.
+    """
+    # Acceder a 'input_question' desde 'example'
+    input_question = example.get("input_question", "")
+    
+    # Acceder a 'contexts' desde 'run.outputs'
+    contexts = run.outputs.get("contexts", "")
+
+    prompt = f"""Como experto evaluador, determina la relevancia de los documentos proporcionados para responder la pregunta. Otorga una puntuación del 0 al 10 y proporciona una breve justificación.
+
+Pregunta: {input_question}
+
+Documentos recuperados:
+{contexts}
+
+Evaluación:
+- Puntuación (0-10):
+- Justificación:"""
+
+    # Generar la evaluación
+    result = model_wrapper.generate([prompt])
+    generated_text = result.generations[0][0].text.strip()
+
+    # Extraer puntuación y comentario
+    try:
+        lines = generated_text.split('\n')
+        score_line = next(line for line in lines if "Puntuación" in line)
+        comment_line = next(line for line in lines if "Justificación" in line)
+        score = float(score_line.split(":")[-1].strip())
+        comment = comment_line.split(":", 1)[-1].strip()
+        normalized_score = score / 10.0  # Normalizar a rango 0-1
+    except Exception as e:
+        print(f"Error al extraer la puntuación y justificación: {e}")
+        normalized_score = 0.0
+        comment = "No se pudo extraer la puntuación y justificación."
+
+    print("Resultado de la generación:", generated_text)
+    return {"key": "document_relevance", "score": normalized_score, "comment": comment}
+
+# Nombre del dataset existente en LangSmith
+dataset_name = "v100-Eval dataset para RAG"
+
+# Ejecutar la evaluación
+experiment_results = evaluate(
+    predict_rag_answer_with_context,
+    data=dataset_name,
+    evaluators=[docs_relevance_evaluator],
+    experiment_prefix="rag-doc-relevance-v2",
+    metadata={"version": "llama-v3p1-70b-instruct"}
+)
