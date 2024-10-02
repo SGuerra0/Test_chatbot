@@ -7,11 +7,12 @@ app = FastAPI()
 
 from fastapi.middleware.cors import CORSMiddleware
 
+# Configuración de CORS para permitir todos los orígenes y métodos
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=[""],  # Cambia esto para restringir los orígenes permitidos
+    allow_origins=["*"],       # Permitir todos los orígenes
     allow_credentials=True,
-    allow_methods=[""],
+    allow_methods=["*"],       # Permitir todos los métodos
     allow_headers=["*"],
 )
 
