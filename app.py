@@ -2,7 +2,7 @@ import streamlit as st
 import requests
 
 # Configura la URL de tu API de FastAPI
-API_URL = "http://127.0.0.1:8000/get_answer"
+API_URL = "https://test-chatbot-z3yi.onrender.com"
 
 # Definir estilos en Streamlit
 st.set_page_config(page_title="UnoAfp GPT", page_icon="🤖", layout="centered")
