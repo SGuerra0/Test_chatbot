@@ -64,8 +64,8 @@ if st.button("Obtener Respuesta"):
     if question.strip():
         with st.spinner('Generando respuesta...'):
             try:
-                # Hacer una solicitud POST a la API
-                response = requests.post(API_URL, json={"question": question})
+                # Hacer una solicitud POST al endpoint correcto de la API
+                response = requests.post(f"{API_URL}/get_answer", json={"question": question})
                 
                 if response.status_code == 200:
                     data = response.json()
